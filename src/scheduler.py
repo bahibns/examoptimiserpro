@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import pandas as pd
 import random
 from src.constraints import ConstraintChecker
@@ -54,9 +54,9 @@ class ExamScheduler:
             while not placed and test_date <= date_fin:
                 # Créneaux horaires (08:30, 11:00, 14:00)
                 creneaux = [
-                    test_date.replace(hour=8, minute=30),
-                    test_date.replace(hour=11, minute=0),
-                    test_date.replace(hour=14, minute=0)
+                    datetime.combine(test_date, time(8, 30)),
+                    datetime.combine(test_date, time(11, 0)),
+                    datetime.combine(test_date, time(14, 0))
                 ]
                 
                 for creneau in creneaux:
