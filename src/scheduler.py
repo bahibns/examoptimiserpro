@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta, time
+import time
+from datetime import datetime, timedelta, time as dt_time
 import pandas as pd
 import random
 from collections import defaultdict
@@ -11,6 +12,8 @@ class ExamScheduler:
         """
         Génère un emploi du temps initial valide (First Fit) avec optimisation en mémoire.
         """
+        start_time = time.time()
+        
         # Récupérer les données une seule fois
         modules = self.db.get_modules_with_inscriptions()
         salles = self.db.get_lieu_examen()
@@ -18,12 +21,12 @@ class ExamScheduler:
         periodes = self.db.get_periodes_examen(actif=True)
         
         if not periodes:
-            return False, "Aucune période active trouvée"
+            return False, {"error": "Aucune période active trouvée"}
         
         # Trouver la période spécifique
         target_periode = next((p for p in periodes if p['id'] == periode_id), None)
         if not target_periode:
-            return False, "Période spécifiée introuvable"
+            return False, {"error": "Période spécifiée introuvable"}
 
         date_debut = target_periode['date_debut']
         date_fin = target_periode['date_fin']
@@ -53,27 +56,26 @@ class ExamScheduler:
         current_date_pointer = date_debut
         
         nb_modules_places = 0
-        nb_modules_total = 0
-
+        failed_modules = []
+        
         for module in modules_sorted:
             # Si filtrage par département
             if dept_id and module['dept_id'] != dept_id:
                 continue
             
-            nb_modules_total += 1
             placed = False
             test_date = current_date_pointer
             
-            # Limite de recherche pour éviter boucle infinie
+            # Limite de recherche pour éviter boucle infinie (date fin + marge)
             max_days_search = (date_fin - date_debut).days + 1
             days_searched = 0
             
             while not placed and test_date <= date_fin:
                 # Créneaux horaires (08:30, 11:00, 14:00)
                 creneaux = [
-                    datetime.combine(test_date, time(8, 30)),
-                    datetime.combine(test_date, time(11, 0)),
-                    datetime.combine(test_date, time(14, 0))
+                    datetime.combine(test_date, dt_time(8, 30)),
+                    datetime.combine(test_date, dt_time(11, 0)),
+                    datetime.combine(test_date, dt_time(14, 0))
                 ]
                 
                 module_formation = module['formation_id']
@@ -86,10 +88,6 @@ class ExamScheduler:
                     continue
 
                 for creneau in creneaux:
-                    # Mélanger les salles pour éviter de toujours remplir la première
-                    # (Optimisation simple pour répartir la charge)
-                    # random.shuffle(salles) # Désactivé pour First Fit strict, activable si besoin
-                    
                     valid_salle = None
                     
                     for salle in salles:
@@ -110,7 +108,7 @@ class ExamScheduler:
                         valid_prof = None
                         candidates = profs if profs else [{'id': 1, 'nom': 'N/A', 'prenom': 'N/A'}]
                         
-                        # Essayer de trouver un prof libre (simple first fit)
+                        # Essayer de trouver un prof libre
                         for prof in candidates:
                             p_id = prof['id']
                             # Vérifier dispo créneau
@@ -126,7 +124,6 @@ class ExamScheduler:
                         if valid_prof:
                             # Tout est bon, on réserve
                             
-                            # Enregistrer examen
                             exam_entry = (
                                 module['id'],
                                 valid_prof['id'],
@@ -157,13 +154,22 @@ class ExamScheduler:
             
             if not placed:
                 print(f"Impossible de placer le module {module['nom']} ({module['nb_inscrits']} inscrits)")
+                failed_modules.append({'nom': module['nom'], 'inscrits': module['nb_inscrits']})
         
         # Sauvegarde en batch
         if examens_crees:
             self.db.batch_insert_exams(examens_crees, surveillances_crees)
-            return True, f"{len(examens_crees)} examens générés avec succès sur {nb_modules_total} modules."
+            
+            end_time = time.time()
+            return True, {
+                'execution_time': end_time - start_time,
+                'scheduled': len(examens_crees),
+                'failed': len(failed_modules),
+                'total_conflicts': 0, # In-memory guarantees 0 hard conflicts
+                'failed_modules': failed_modules
+            }
         else:
-            return False, "Aucun examen n'a pu être généré."
+            return False, {"error": "Aucun examen n'a pu être généré (peut-être manque de salles/profs ?)"}
 
     def optimize_schedule(self, periode_id):
         """
