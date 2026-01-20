@@ -111,7 +111,7 @@ def main():
                             progress_bar.progress(30)
                             
                             # Use ExamScheduler for scheduling
-                            success, result = scheduler.generate_schedule(periode_id, annee_universitaire)
+                            success, result = scheduler.generate_schedule(periode_id)
                             
                             progress_bar.progress(80)
                             status_text.text("Finalisation...")
