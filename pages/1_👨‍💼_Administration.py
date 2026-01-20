@@ -120,6 +120,16 @@ def main():
                                 progress_bar.progress(100)
                                 status_text.text("Terminé!")
                                 
+                                # Defensive check: Ensure result is a dict (in case of legacy scheduler version)
+                                if not isinstance(result, dict):
+                                    result = {
+                                        'execution_time': 0.0,
+                                        'scheduled': "Pending update",
+                                        'failed': 0,
+                                        'total_conflicts': 0,
+                                        'failed_modules': []
+                                    }
+                                
                                 st.markdown(f"""
                                 <div class="custom-alert alert-success">
                                     <h4>✅ EDT généré avec succès en {result['execution_time']:.2f} secondes!</h4>
