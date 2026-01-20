@@ -63,6 +63,38 @@ class Database:
     def execute_many(self, query, params_list):
         with self.get_cursor(dict_cursor=False) as cursor:
             cursor.executemany(query, params_list)
+            
+    def bulk_copy(self, table_name, data, columns):
+        """
+        Optimized bulk insert using COPY FROM STDIN.
+        """
+        if not data:
+            return
+            
+        import io
+        
+        # Prepare buffer
+        s_buf = io.StringIO()
+        for row in data:
+            # Simple TSV formatting
+            # Replace None with \N, remove tabs/newlines from strings
+            clean_row = []
+            for v in row:
+                if v is None:
+                    clean_row.append(r'\N')
+                else:
+                    clean_row.append(str(v).replace('\t', ' ').replace('\n', ' ').replace('\r', ' '))
+            s_buf.write('\t'.join(clean_row) + '\n')
+            
+        s_buf.seek(0)
+        
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                try:
+                    cur.copy_from(s_buf, table_name, columns=columns)
+                except Exception as e:
+                    print(f"Copy error: {e}")
+                    raise e
     
     def get_departements(self):
         query = "SELECT * FROM departements ORDER BY nom"

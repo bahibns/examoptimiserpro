@@ -145,11 +145,8 @@ def generate_professeurs(dept_ids):
             
             professeurs.append((nom, prenom, email, dept_id, specialite, grade))
     
-    query = """
-        INSERT INTO professeurs (nom, prenom, email, dept_id, specialite, grade)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """
-    db.execute_many(query, professeurs)
+    print(f" Insertion de {len(professeurs)} professeurs via COPY...")
+    db.bulk_copy('professeurs', professeurs, ['nom', 'prenom', 'email', 'dept_id', 'specialite', 'grade'])
     
     print(f" {len(professeurs)} professeurs créés")
     return len(professeurs)
@@ -173,18 +170,12 @@ def generate_etudiants(formation_ids):
             
             etudiants.append((nom, prenom, email, formation_id, promo))
     
-    query = """
-        INSERT INTO etudiants (nom, prenom, email, formation_id, promo)
-        VALUES (%s, %s, %s, %s, %s)
-    """
+    print(f" Insertion de {len(etudiants)} étudiants via COPY ({len(etudiants)} lignes)...")
     
-    batch_size = 1000
-    for i in range(0, len(etudiants), batch_size):
-        batch = etudiants[i:i + batch_size]
-        db.execute_many(query, batch)
-        print(f"  Batch {i//batch_size + 1}: {len(batch)} étudiants insérés")
+    # Bulk copy en une seule fois (13000 lignes tiennent largement en mémoire)
+    db.bulk_copy('etudiants', etudiants, ['nom', 'prenom', 'email', 'formation_id', 'promo'])
     
-    print(f" {len(etudiants)} étudiants créés")
+    print(f"✅ {len(etudiants)} étudiants créés")
     return len(etudiants)
 
 def generate_modules(formation_ids):
@@ -213,17 +204,9 @@ def generate_modules(formation_ids):
             
             modules_data.append((nom, code, credits, formation_id, semestre, duree_examen))
             
-    print(f"  Insertion de {len(modules_data)} modules...")
-    query = """
-        INSERT INTO modules (nom, code, credits, formation_id, semestre, duree_examen)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """
+    print(f"  Insertion de {len(modules_data)} modules via COPY...")
     
-    # Insérer par batch pour éviter une requête géante si beaucoup de modules
-    batch_size = 1000
-    for i in range(0, len(modules_data), batch_size):
-        batch = modules_data[i:i + batch_size]
-        db.execute_many(query, batch)
+    db.bulk_copy('modules', modules_data, ['nom', 'code', 'credits', 'formation_id', 'semestre', 'duree_examen'])
     
     # Récupérer les ids
     result = db.execute_query("SELECT id FROM modules")
@@ -271,17 +254,11 @@ def generate_inscriptions(module_ids):
         for mod_id in selected_module_ids:
             inscriptions.append((etudiant['id'], mod_id, annee, 'inscrit'))
     
-    print(f"  Insertion de {len(inscriptions)} inscriptions en base...")
-    query = """
-        INSERT INTO inscriptions (etudiant_id, module_id, annee_universitaire, statut)
-        VALUES (%s, %s, %s, %s)
-    """
+    print(f"  Insertion de {len(inscriptions)} inscriptions via COPY...")
     
-    batch_size = 5000
-    for i in range(0, len(inscriptions), batch_size):
-        batch = inscriptions[i:i + batch_size]
-        db.execute_many(query, batch)
-        print(f"    Batch {i//batch_size + 1}/{len(inscriptions)//batch_size + 1}: {len(batch)} insérées")
+    # Pour 100k+ lignes, on peut faire en une fois car c'est léger (entiers), mais un petit batching c'est safe
+    # Bulk copy est tellement rapide que 100k passe en < 2s
+    db.bulk_copy('inscriptions', inscriptions, ['etudiant_id', 'module_id', 'annee_universitaire', 'statut'])
     
     print(f"✅ {len(inscriptions)} inscriptions créées")
     return len(inscriptions)
