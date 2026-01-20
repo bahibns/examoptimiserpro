@@ -80,8 +80,8 @@ def generate_salles():
     return len(salles_final)
 
 def generate_formations(dept_ids):
-    print("Génération des formations...")
-    formations = []
+    print("Génération des formations (OPTIMISÉE)...")
+    formations_data = []
     
     specialites = {
         'Informatique': ['Génie Logiciel', 'Réseaux et Sécurité', 'Intelligence Artificielle', 'Systèmes Embarqués'],
@@ -95,11 +95,16 @@ def generate_formations(dept_ids):
     
     niveaux = ['L1', 'L2', 'L3', 'M1', 'M2']
     
-    formation_ids = []
+    print("  Préparation des données...")
+    # Pré-charger les noms de départements
+    depts_map = {} # id -> nom
+    rows = db.execute_query("SELECT id, nom FROM departements")
+    for r in rows:
+        depts_map[r['id']] = r['nom']
+    
     counter = 1
     for dept_id in dept_ids:
-        dept_info = db.execute_query("SELECT nom FROM departements WHERE id = %s", (dept_id,))[0]
-        dept_nom = dept_info['nom']
+        dept_nom = depts_map.get(dept_id, 'Général')
         
         for spec in specialites.get(dept_nom, ['Général']):
             for niveau in niveaux:
@@ -107,13 +112,19 @@ def generate_formations(dept_ids):
                 nom = f"{niveau} {spec}"
                 nb_modules = random.randint(8, 12)
                 
-                query = """
-                    INSERT INTO formations (nom, code, dept_id, niveau, nb_modules)
-                    VALUES (%s, %s, %s, %s, %s) RETURNING id
-                """
-                result = db.execute_query(query, (nom, code, dept_id, niveau, nb_modules))
-                formation_ids.append(result[0]['id'])
+                formations_data.append((nom, code, dept_id, niveau, nb_modules))
                 counter += 1
+    
+    print(f"  Insertion de {len(formations_data)} formations...")
+    query = """
+        INSERT INTO formations (nom, code, dept_id, niveau, nb_modules)
+        VALUES (%s, %s, %s, %s, %s)
+    """
+    db.execute_many(query, formations_data)
+    
+    # Récupérer les IDs générés
+    result = db.execute_query("SELECT id FROM formations")
+    formation_ids = [r['id'] for r in result]
     
     print(f"✅ {len(formation_ids)} formations créées")
     return formation_ids
@@ -177,8 +188,8 @@ def generate_etudiants(formation_ids):
     return len(etudiants)
 
 def generate_modules(formation_ids):
-    print("Génération des modules...")
-    modules = []
+    print("Génération des modules (OPTIMISÉE)...")
+    modules_data = []
     
     module_names = [
         'Algorithmique', 'Structures de données', 'Bases de données', 'Réseaux',
@@ -190,7 +201,7 @@ def generate_modules(formation_ids):
         'Microéconomie', 'Macroéconomie', 'Finance', 'Marketing', 'Management'
     ]
     
-    module_ids = []
+    print("  Préparation des données modules...")
     for formation_id in formation_ids:
         nb_modules = random.randint(8, 12)
         for i in range(nb_modules):
@@ -198,44 +209,69 @@ def generate_modules(formation_ids):
             code = f"MOD-{formation_id}-{i+1:03d}"
             credits = random.choice([3, 4, 5, 6])
             semestre = random.choice([1, 2])
-            duree_examen = 90  # Durée fixe de 90 minutes pour tous les examens
+            duree_examen = 90
             
-            query = """
-                INSERT INTO modules (nom, code, credits, formation_id, semestre, duree_examen)
-                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
-            """
-            result = db.execute_query(query, (nom, code, credits, formation_id, semestre, duree_examen))
-            module_ids.append(result[0]['id'])
+            modules_data.append((nom, code, credits, formation_id, semestre, duree_examen))
+            
+    print(f"  Insertion de {len(modules_data)} modules...")
+    query = """
+        INSERT INTO modules (nom, code, credits, formation_id, semestre, duree_examen)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """
     
-    print(f" {len(module_ids)} modules créés")
+    # Insérer par batch pour éviter une requête géante si beaucoup de modules
+    batch_size = 1000
+    for i in range(0, len(modules_data), batch_size):
+        batch = modules_data[i:i + batch_size]
+        db.execute_many(query, batch)
+    
+    # Récupérer les ids
+    result = db.execute_query("SELECT id FROM modules")
+    module_ids = [r['id'] for r in result]
+    
+    print(f"✅ {len(module_ids)} modules créés")
     return module_ids
 
 def generate_inscriptions(module_ids):
-    print("Génération des inscriptions ...")
+    print("Génération des inscriptions (OPTIMISÉE)...")
     
+    # 1. Récupérer tous les étudiants en une fois
+    print("  Récupération des étudiants...")
     etudiants = db.execute_query("SELECT id, formation_id FROM etudiants")
     
-    inscriptions = []
-    annee = "2025-2026"  # Updated academic year
+    # 2. Récupérer tous les modules en une fois et les indexer par formation
+    print("  Récupération et indexation des modules...")
+    all_modules = db.execute_query("SELECT id, formation_id FROM modules")
     
+    modules_by_formation = {}
+    for mod in all_modules:
+        fid = mod['formation_id']
+        if fid not in modules_by_formation:
+            modules_by_formation[fid] = []
+        modules_by_formation[fid].append(mod['id'])
+    
+    inscriptions = []
+    annee = "2025-2026"
+    
+    print(f"  Génération des liens inscriptions pour {len(etudiants)} étudiants...")
     for etudiant in etudiants:
-        formation_modules = db.execute_query(
-            "SELECT id FROM modules WHERE formation_id = %s",
-            (etudiant['formation_id'],)
-        )
+        fid = etudiant['formation_id']
+        formation_modules = modules_by_formation.get(fid, [])
         
-        # Ensure student takes between 7 and 9 modules (max 9 examens)
-        # Cap by available modules if fewer than 7 (though modules are 8-12)
+        if not formation_modules:
+            continue
+        
+        # Ensure student takes between 7 and 9 modules
         min_modules = min(7, len(formation_modules))
         max_modules = min(9, len(formation_modules))
         
         nb_modules = random.randint(min_modules, max_modules)
+        selected_module_ids = random.sample(formation_modules, nb_modules)
         
-        selected_modules = random.sample(formation_modules, nb_modules)
-        
-        for module in selected_modules:
-            inscriptions.append((etudiant['id'], module['id'], annee, 'inscrit'))
+        for mod_id in selected_module_ids:
+            inscriptions.append((etudiant['id'], mod_id, annee, 'inscrit'))
     
+    print(f"  Insertion de {len(inscriptions)} inscriptions en base...")
     query = """
         INSERT INTO inscriptions (etudiant_id, module_id, annee_universitaire, statut)
         VALUES (%s, %s, %s, %s)
@@ -245,9 +281,9 @@ def generate_inscriptions(module_ids):
     for i in range(0, len(inscriptions), batch_size):
         batch = inscriptions[i:i + batch_size]
         db.execute_many(query, batch)
-        print(f"  Batch {i//batch_size + 1}: {len(batch)} inscriptions insérées")
+        print(f"    Batch {i//batch_size + 1}/{len(inscriptions)//batch_size + 1}: {len(batch)} insérées")
     
-    print(f" {len(inscriptions)} inscriptions créées")
+    print(f"✅ {len(inscriptions)} inscriptions créées")
     return len(inscriptions)
 
 def generate_periode_examen():
@@ -279,6 +315,9 @@ def main():
     print("=" * 60)
     
     try:
+        print("Nettoyage des données existantes...")
+        db.execute_query("TRUNCATE departements, lieu_examen, formations, professeurs, etudiants, modules, inscriptions, examens, surveillances, periodes_examen CASCADE", fetch=False)
+        
         dept_ids = generate_departements()
         generate_salles()
         formation_ids = generate_formations(dept_ids)
@@ -303,7 +342,7 @@ def main():
         print(f"  - Salles: {kpis['total_salles']}")
         
     except Exception as e:
-        print(f"\n❌ Erreur: {e}")
+        print(f"\n[ERREUR] : {e}")
         import traceback
         traceback.print_exc()
 
