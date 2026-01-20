@@ -1,28 +1,27 @@
 from datetime import datetime, timedelta, time
 import pandas as pd
 import random
-from src.constraints import ConstraintChecker
+from collections import defaultdict
 
 class ExamScheduler:
     def __init__(self, db):
         self.db = db
-        self.checker = ConstraintChecker(db)
 
     def generate_schedule(self, periode_id, dept_id=None):
         """
-        Génère un emploi du temps initial valide (First Fit).
+        Génère un emploi du temps initial valide (First Fit) avec optimisation en mémoire.
         """
-        # Récupérer les données
+        # Récupérer les données une seule fois
         modules = self.db.get_modules_with_inscriptions()
         salles = self.db.get_lieu_examen()
         profs = self.db.get_professeurs(dept_id)
-        periode = self.db.get_periodes_examen(actif=True)
+        periodes = self.db.get_periodes_examen(actif=True)
         
-        if not periode:
+        if not periodes:
             return False, "Aucune période active trouvée"
         
         # Trouver la période spécifique
-        target_periode = next((p for p in periode if p['id'] == periode_id), None)
+        target_periode = next((p for p in periodes if p['id'] == periode_id), None)
         if not target_periode:
             return False, "Période spécifiée introuvable"
 
@@ -35,21 +34,39 @@ class ExamScheduler:
         examens_crees = []
         surveillances_crees = []
         
-        # Trier modules par nombre d'inscrits décroissant (plus difficile à placer en premier)
+        # Structures de données en mémoire pour validation ultra-rapide
+        # (salle_id, datetime) -> True
+        salle_occupancy = set()
+        
+        # (prof_id, datetime) -> True
+        prof_occupancy = set()
+        
+        # (prof_id, date) -> count
+        prof_daily_count = defaultdict(int)
+        
+        # (formation_id, date) -> True (Pour éviter 2 examens le même jour pour la même promo)
+        formation_daily_occupancy = defaultdict(set)
+        
+        # Trier modules par nombre d'inscrits décroissant
         modules_sorted = sorted(modules, key=lambda x: x['nb_inscrits'], reverse=True)
         
-        current_date = date_debut
+        current_date_pointer = date_debut
         
-        in_memory_exams = [] # Pour vérification conflits en mémoire
-        
+        nb_modules_places = 0
+        nb_modules_total = 0
+
         for module in modules_sorted:
             # Si filtrage par département
             if dept_id and module['dept_id'] != dept_id:
                 continue
-                
+            
+            nb_modules_total += 1
             placed = False
-            attempts = 0
-            test_date = current_date
+            test_date = current_date_pointer
+            
+            # Limite de recherche pour éviter boucle infinie
+            max_days_search = (date_fin - date_debut).days + 1
+            days_searched = 0
             
             while not placed and test_date <= date_fin:
                 # Créneaux horaires (08:30, 11:00, 14:00)
@@ -59,74 +76,98 @@ class ExamScheduler:
                     datetime.combine(test_date, time(14, 0))
                 ]
                 
+                module_formation = module['formation_id']
+                
+                # Vérifier si la formation a déjà un examen ce jour-là
+                if test_date in formation_daily_occupancy[module_formation]:
+                    # Passer au jour suivant
+                    test_date += timedelta(days=1)
+                    days_searched += 1
+                    continue
+
                 for creneau in creneaux:
-                    # Trouver une salle valide
+                    # Mélanger les salles pour éviter de toujours remplir la première
+                    # (Optimisation simple pour répartir la charge)
+                    # random.shuffle(salles) # Désactivé pour First Fit strict, activable si besoin
+                    
                     valid_salle = None
+                    
                     for salle in salles:
-                        exam_data = {
-                            'module_id': module['id'],
-                            'salle_id': salle['id'],
-                            'date_heure': creneau,
-                            'duree_minutes': module['duree_examen'],
-                            'nb_inscrits': module['nb_inscrits'],
-                            'prof_responsable_id': profs[0]['id'] if profs else 1 # Placeholder prof
-                        }
-                        
-                        # Vérifier capacité
+                        # 1. Vérifier capacité
                         if salle['capacite_examen'] < module['nb_inscrits']:
                             continue
+                        
+                        # 2. Vérifier disponibilité salle
+                        if (salle['id'], creneau) in salle_occupancy:
+                            continue
                             
-                        # Vérifier contraintes de base
-                        valid, _ = self.checker.validate_examen(exam_data, in_memory_exams)
-                        if valid:
-                            valid_salle = salle
-                            break
+                        # Salle valide trouvée
+                        valid_salle = salle
+                        break
                     
                     if valid_salle:
-                        # Assigner un prof responsable (simple round-robin ou random pour l'instant)
-                        prof = random.choice(profs) if profs else {'id': 1}
+                        # Trouver un prof disponible
+                        valid_prof = None
+                        candidates = profs if profs else [{'id': 1, 'nom': 'N/A', 'prenom': 'N/A'}]
                         
-                        exam_entry = (
-                            module['id'],
-                            prof['id'],
-                            valid_salle['id'],
-                            periode_id,
-                            creneau,
-                            module['duree_examen'],
-                            module['nb_inscrits']
-                        )
-                        examens_crees.append(exam_entry)
+                        # Essayer de trouver un prof libre (simple first fit)
+                        for prof in candidates:
+                            p_id = prof['id']
+                            # Vérifier dispo créneau
+                            if (p_id, creneau) in prof_occupancy:
+                                continue
+                            # Vérifier max 3 par jour
+                            if prof_daily_count[(p_id, test_date)] >= 3:
+                                continue
+                                
+                            valid_prof = prof
+                            break
                         
-                        # Mettre à jour la mémoire pour les conflits
-                        in_memory_exams.append({
-                            'module_id': module['id'],
-                            'date_heure': creneau,
-                            'duree_minutes': module['duree_examen']
-                        })
-                        
-                        # Créer surveillance pour le responsable
-                        surveillances_crees.append((module['id'], periode_id, prof['id'], 'responsable'))
-                        
-                        placed = True
-                        break
+                        if valid_prof:
+                            # Tout est bon, on réserve
+                            
+                            # Enregistrer examen
+                            exam_entry = (
+                                module['id'],
+                                valid_prof['id'],
+                                valid_salle['id'],
+                                periode_id,
+                                creneau,
+                                module['duree_examen'],
+                                module['nb_inscrits']
+                            )
+                            examens_crees.append(exam_entry)
+                            
+                            # Enregistrer surveillance
+                            surveillances_crees.append((module['id'], periode_id, valid_prof['id'], 'responsable'))
+                            
+                            # Mettre à jour les structures en mémoire
+                            salle_occupancy.add((valid_salle['id'], creneau))
+                            prof_occupancy.add((valid_prof['id'], creneau))
+                            prof_daily_count[(valid_prof['id'], test_date)] += 1
+                            formation_daily_occupancy[module_formation].add(test_date)
+                            
+                            placed = True
+                            nb_modules_places += 1
+                            break
                 
                 if not placed:
                     test_date += timedelta(days=1)
+                    days_searched += 1
             
             if not placed:
-                print(f"Impossible de placer le module {module['nom']}")
+                print(f"Impossible de placer le module {module['nom']} ({module['nb_inscrits']} inscrits)")
         
         # Sauvegarde en batch
         if examens_crees:
             self.db.batch_insert_exams(examens_crees, surveillances_crees)
-            return True, f"{len(examens_crees)} examens générés avec succès"
+            return True, f"{len(examens_crees)} examens générés avec succès sur {nb_modules_total} modules."
         else:
-            return False, "Aucun examen n'a pu être généré"
+            return False, "Aucun examen n'a pu être généré."
 
     def optimize_schedule(self, periode_id):
         """
         Améliore l'emploi du temps existant (Best Fit, équilibrage).
         """
         # TODO: Implémenter une logique d'optimisation plus poussée (swap, annealing...)
-        # Pour l'instant, on retourne juste un succès simulé car l'utilisateur veut surtout séparer les rôles.
         return True, "Optimisation terminée (Simulée pour l'instant)"
